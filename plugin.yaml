@@ -1,0 +1,4 @@
+name: juggle-bridge
+version: 0.2.0
+description: "Connects the Juggle app (iPhone, Mac) to Hermes: a local relay API, an outbound WebSocket to the Juggle hub, end-to-end encrypted device pairing, and a Juggle chat platform."
+author: hyouuu
