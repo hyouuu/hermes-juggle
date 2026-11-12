@@ -11,11 +11,13 @@ The dashboard session token never leaves this machine.
 import hmac
 import importlib.util
 import json
+import uuid
 import os
 import sys
 import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -203,6 +205,22 @@ def forward(method, path_qs, body=None):
     return 502, b"{}"
 
 
+def delete_session(sid):
+    """The dashboard's fenced delete: read the session's mutation snapshot, then
+    DELETE with that revision so a session that changed meanwhile isn't removed."""
+    code, body = forward("GET", f"/api/sessions/{sid}/mutation-snapshot")
+    if code != 200:
+        return code
+    snap = json.loads(body)
+    if not snap.get("exists"):
+        return 200  # already gone
+    q = {"request_id": str(uuid.uuid4()), "expected_revision": int(snap["runtime_revision"])}
+    if snap.get("runtime_generation") is not None:
+        q["expected_generation"] = int(snap["runtime_generation"])
+    code, _ = forward("DELETE", f"/api/sessions/{sid}?" + urllib.parse.urlencode(q))
+    return code
+
+
 JUGGLE_KEY_PREFIX = "agent:main:juggle:dm:"
 
 
@@ -345,6 +363,28 @@ class Handler(BaseHTTPRequestHandler):
         cid = live.new_chat_id()
         self.reply_juggle(cid, compose(text, images), {"session_key": JUGGLE_KEY_PREFIX + cid})
 
+    def delete_sessions(self):
+        """Delete Hermes sessions (history, files) the user picked in Juggle.
+        Uses the dashboard's per-session DELETE, which also scrubs on-disk
+        snapshots. Discord/Telegram messages themselves are left alone."""
+        try:
+            n = min(int(self.headers.get("Content-Length", 0)), 65536)
+            ids = json.loads(self.rfile.read(n) or b"{}").get("ids")
+        except Exception:
+            return self.reply(400, b'{"error":"bad json"}')
+        if not isinstance(ids, list) or not 0 < len(ids) <= 500 or \
+                not all(isinstance(i, str) and re.fullmatch(ID, i) for i in ids):
+            return self.reply(400, b'{"error":"ids must be 1-500 session ids"}')
+        deleted, failed = [], []
+        for sid in dict.fromkeys(ids):
+            try:
+                code = delete_session(sid)
+            except Exception:
+                code = 502
+            (deleted if 200 <= code < 300 else failed).append(sid)
+        self.reply(200 if deleted or not failed else 502,
+                   json.dumps({"deleted": deleted, "failed": failed}).encode())
+
     def do_POST(self):
         """Reply from Juggle: queue the text as a user turn in the session's
         gateway conversation via the session-dispatch plugin's inbox."""
@@ -359,6 +399,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.new_thread()
         if path == "/api/juggle/chats":
             return self.new_juggle_chat()
+        if path == "/api/sessions/delete":
+            return self.delete_sessions()
         m = REPLY_OK.match(path)
         if not m:
             return self.reply(404, b'{"error":"not allowed"}')
