@@ -100,6 +100,27 @@ def discord(method, path, body=None):
         return json.loads(data) if data else {}
 
 
+# What a Juggle transcript shows. Reasoning details, tool calls/output and the
+# provider replay fields are most of a page's bytes and never displayed.
+MESSAGE_FIELDS = ("id", "role", "content", "display_kind", "tool_name", "timestamp",
+                  "reasoning", "reasoning_content")
+
+
+def slim_messages(body):
+    try:
+        data = json.loads(body)
+        rows = []
+        for m in data.get("messages") or []:
+            r = {k: m.get(k) for k in MESSAGE_FIELDS if m.get(k) is not None}
+            if r.get("role") == "tool":
+                r.pop("content", None)
+            rows.append(r)
+        data["messages"] = rows
+        return json.dumps(data).encode()
+    except Exception:
+        return body
+
+
 _channels = (0.0, None)
 
 
@@ -313,7 +334,10 @@ class Handler(BaseHTTPRequestHandler):
         if not any(p.match(path) for p in GET_OK):
             return self.reply(404, b'{"error":"not allowed"}')
         try:
-            self.reply(*forward("GET", path + qs))
+            status, out = forward("GET", path + qs)
+            if status == 200 and path.endswith("/messages"):
+                out = slim_messages(out)
+            self.reply(status, out)
         except Exception:
             self.reply(502, b'{"error":"dashboard unreachable"}')
 
