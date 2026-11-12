@@ -112,6 +112,32 @@ def _dashboard_loop():
         time.sleep(15)
 
 
+# ---- direct route (same network / tailnet) ---------------------------------
+
+def _ensure_direct():
+    """Start the direct listener once per gateway process, including after a plugin reload."""
+    if any(th.name == "juggle-bridge-direct" and th.is_alive() for th in threading.enumerate()):
+        return
+    threading.Thread(target=_direct_loop, name="juggle-bridge-direct", daemon=True).start()
+
+
+def _direct_loop():
+    from . import direct
+    if not direct.ENABLED:
+        return
+    warned = False
+    while True:
+        try:
+            direct.serve(RELAY)
+        except OSError as e:
+            if not warned:
+                log.warning("juggle-bridge: direct route unavailable (%s); phones will use the hub", e)
+                warned = True
+        except Exception:
+            log.exception("juggle-bridge: direct route crashed; retrying in 60s")
+        time.sleep(60)
+
+
 # ---- hub connection --------------------------------------------------------
 
 def _local(frame):
@@ -211,6 +237,8 @@ def register(ctx) -> None:
     try:
         if os.environ.get("_HERMES_GATEWAY") == "1" and "dashboard" not in sys.argv:
             _hot_swap_relay()
+            if SECRET_FILE.exists():
+                _ensure_direct()
     except Exception:
         log.exception("juggle-bridge: relay hot swap failed")
     # The relay hands replies to existing sessions to Hermes through this.

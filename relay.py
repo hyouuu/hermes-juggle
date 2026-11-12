@@ -9,6 +9,7 @@ through the hub connection the plugin keeps open, end to end encrypted.
 The dashboard session token never leaves this machine.
 """
 import hmac
+import importlib.util
 import json
 import os
 import sys
@@ -255,6 +256,17 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "private, max-age=86400")
             self.end_headers()
             return self.wfile.write(data)
+        if path == "/api/juggle/direct":
+            # Addresses a paired phone can try before the hub (same network or tailnet).
+            try:
+                spec = importlib.util.spec_from_file_location(
+                    "juggle_direct", Path(__file__).resolve().parent / "direct.py")
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                found = mod.addresses()
+            except Exception:
+                found = []
+            return self.reply(200, json.dumps({"direct": found}).encode())
         if path == "/api/channels":
             try:
                 return self.reply(200, json.dumps({"channels": channels()}).encode())

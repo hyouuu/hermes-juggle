@@ -149,6 +149,12 @@ def new_pairing(hub=None):
     from urllib.parse import urlencode
     q = urlencode({"hub": hub or hub_public(), "id": pid, "code": b64u(code), "pk": b64u(bridge_pub()),
                    "name": os.uname().nodename.split(".")[0]})
+    try:
+        from . import direct
+        for d in direct.addresses():
+            q += "&" + urlencode({"direct": d})
+    except Exception:
+        pass
     return f"juggle://pair?{q}"
 
 
