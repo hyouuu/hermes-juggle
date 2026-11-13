@@ -249,6 +249,45 @@ def juggle_chat_id(key):
     return key[len(JUGGLE_KEY_PREFIX):] if (key or "").startswith(JUGGLE_KEY_PREFIX) else None
 
 
+def discord_channel_id(key):
+    """The Discord channel/thread a session key replies into, or None.
+    Keys look like agent:main:discord:<kind>:<chat_id>[:<thread_id>]."""
+    parts = (key or "").split(":")
+    if len(parts) < 5 or parts[2] != "discord":
+        return None
+    ids = [p for p in parts[4:] if p.isdigit()]
+    return ids[-1] if ids else None
+
+
+def post_from_juggle(channel_id, text, images):
+    """Show a Juggle-sent message in Discord, images attached, as the bot.
+    Bot messages are ignored by the gateway, so Hermes still gets one turn."""
+    content = ("**From Juggle:** " + text)[:1990] if text else "**From Juggle:**"
+    files = [Path(p) for p in images][:6]
+    if not files:
+        return discord("POST", f"/channels/{channel_id}/messages",
+                       {"content": content, "allowed_mentions": {"parse": []}})
+    boundary = uuid.uuid4().hex
+    payload = {"content": content, "allowed_mentions": {"parse": []},
+               "attachments": [{"id": i, "filename": f.name} for i, f in enumerate(files)]}
+    chunks = [f"--{boundary}\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n"
+              f"Content-Type: application/json\r\n\r\n{json.dumps(payload)}\r\n".encode()]
+    for i, f in enumerate(files):
+        ctype = IMAGE_TYPES.get(f.suffix.lower(), "application/octet-stream")
+        chunks.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"files[{i}]\"; "
+                      f"filename=\"{f.name}\"\r\nContent-Type: {ctype}\r\n\r\n".encode()
+                      + f.read_bytes() + b"\r\n")
+    chunks.append(f"--{boundary}--\r\n".encode())
+    req = urllib.request.Request(DISCORD_API + f"/channels/{channel_id}/messages", method="POST",
+                                 data=b"".join(chunks))
+    req.add_header("Authorization", "Bot " + env("DISCORD_BOT_TOKEN"))
+    req.add_header("User-Agent", "JuggleRelay (https://github.com/hyouuu/hermes-juggle, 1)")
+    req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+    with urllib.request.urlopen(req, timeout=30) as r:
+        data = r.read()
+        return json.loads(data) if data else {}
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "JuggleRelay"
 
@@ -438,6 +477,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(400, b'{"error":"bad json"}')
         if not text and not images:
             return self.reply(400, b'{"error":"empty"}')
+        typed = text
         text = compose(text, images)
         try:
             code, body = forward("GET", f"/api/sessions/{m.group(1)}")
@@ -451,6 +491,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply_juggle(jid, text)
         if not key or s.get("source") == "cron":
             return self.reply(409, b'{"error":"this session has no live chat to reply into"}')
+        cid = discord_channel_id(key)
+        if cid:
+            try:  # so the Discord thread shows what was sent from Juggle, images included
+                post_from_juggle(cid, typed, images)
+            except Exception:
+                pass
         ok = dispatch({"session_key": key, "content": text})
         if ok is None:
             return self.reply(202, b'{"ok":true,"queued":true}')
@@ -496,9 +542,7 @@ class Handler(BaseHTTPRequestHandler):
             uid = env("DISCORD_ALLOWED_USERS").split(",")[0].strip()
             if uid:
                 discord("PUT", f"/channels/{th['id']}/thread-members/{uid}")
-            msg = discord("POST", f"/channels/{th['id']}/messages",
-                          {"content": ("**From Juggle:** " + text)[:1990] if text else "**From Juggle:** (image)",
-                           "allowed_mentions": {"parse": []}})
+            msg = post_from_juggle(th["id"], text, images)
         except urllib.error.HTTPError as e:
             detail = e.read()[:300].decode(errors="replace")
             return self.reply(502, json.dumps({"error": f"discord {e.code}", "detail": detail}).encode())
