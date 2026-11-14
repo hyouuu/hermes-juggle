@@ -448,6 +448,42 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(200 if deleted or not failed else 502,
                    json.dumps({"deleted": deleted, "failed": failed}).encode())
 
+    def rename_discord(self):
+        """Rename a Discord thread or channel the user renamed in Juggle.
+
+        Body: {"id", "name"}. Only channels and threads in servers the bot is
+        already in are accepted. Text channel names get Discord's own form
+        (lowercase, hyphens); threads keep the name as typed."""
+        try:
+            n = min(int(self.headers.get("Content-Length", 0)), 4096)
+            body = json.loads(self.rfile.read(n) or b"{}")
+            cid = str(body.get("id") or "")
+            name = " ".join(str(body.get("name") or "").split())[:100]
+        except Exception:
+            return self.reply(400, b'{"error":"bad json"}')
+        if not re.fullmatch(r"\d{15,22}", cid) or not name:
+            return self.reply(400, b'{"error":"id and name required"}')
+        try:
+            ch = discord("GET", f"/channels/{cid}")
+            if not any(c["guild_id"] == str(ch.get("guild_id")) for c in channels()):
+                return self.reply(404, b'{"error":"unknown server"}')
+            if ch.get("type") in (0, 5):
+                name = re.sub(r"[^a-z0-9_-]+", "-", name.lower()).strip("-")[:100]
+                if not name:
+                    return self.reply(400, b'{"error":"name has no usable characters"}')
+            elif ch.get("type") not in (10, 11, 12):
+                return self.reply(400, b'{"error":"not a thread or text channel"}')
+            done = discord("PATCH", f"/channels/{cid}", {"name": name})
+            if ch.get("type") in (0, 5):
+                global _channels
+                _channels = (0.0, None)
+            self.reply(200, json.dumps({"ok": True, "name": done.get("name", name)}).encode())
+        except urllib.error.HTTPError as e:
+            msg = "Discord limits renames to 2 per 10 minutes; try again later" if e.code == 429 else f"Discord said {e.code}"
+            self.reply(502, json.dumps({"error": msg}).encode())
+        except Exception:
+            self.reply(502, b'{"error":"discord unreachable"}')
+
     def do_POST(self):
         """Reply from Juggle: queue the text as a user turn in the session's
         gateway conversation via the session-dispatch plugin's inbox."""
@@ -464,6 +500,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.new_juggle_chat()
         if path == "/api/sessions/delete":
             return self.delete_sessions()
+        if path == "/api/discord/rename":
+            return self.rename_discord()
         m = REPLY_OK.match(path)
         if not m:
             return self.reply(404, b'{"error":"not allowed"}')
