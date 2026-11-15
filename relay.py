@@ -359,6 +359,27 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception:
                         pass
             return self.reply(200, json.dumps({"events": out}).encode())
+        if path == "/api/juggle/messages":
+            # Newest page of many threads in one round trip, so a phone far from the
+            # Mac warms its whole chat list without paying the hub latency per thread.
+            q = urllib.parse.parse_qs(qs.lstrip("?"))
+            ids = [i for i in (q.get("ids") or [""])[0].split(",") if re.fullmatch(ID, i)][:40]
+            limits = (q.get("limits") or [""])[0].split(",")
+            def one(pair):
+                i, sid = pair
+                try:
+                    lim = max(1, min(int(limits[i]), 200))
+                except Exception:
+                    lim = 40
+                try:
+                    status, out = forward("GET", f"/api/sessions/{sid}/messages?limit={lim}&order=latest&offset=0")
+                    return sid, json.loads(slim_messages(out)) if status == 200 else None
+                except Exception:
+                    return sid, None
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(8) as ex:
+                got = dict(ex.map(one, enumerate(ids)))
+            return self.reply(200, json.dumps({"threads": {k: v for k, v in got.items() if v is not None}}).encode())
         if (m := EVENTS_OK.match(path)):
             out = []
             if EVENTS.exists():
