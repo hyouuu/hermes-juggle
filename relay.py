@@ -372,7 +372,7 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     lim = 40
                 try:
-                    status, out = forward("GET", f"/api/sessions/{sid}/messages?limit={lim}&order=latest&offset=0")
+                    status, out = forward("GET", f"/api/sessions/{sid}/messages?limit={lim}&order=latest&offset=0&include_compacted=true")
                     return sid, json.loads(slim_messages(out)) if status == 200 else None
                 except Exception:
                     return sid, None
