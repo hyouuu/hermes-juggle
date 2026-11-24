@@ -15,6 +15,7 @@ import uuid
 import os
 import sys
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -550,13 +551,17 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply_juggle(jid, text)
         if not key or s.get("source") == "cron":
             return self.reply(409, b'{"error":"this session has no live chat to reply into"}')
-        cid = discord_channel_id(key)
-        if cid:
-            try:  # so the Discord thread shows what was sent from Juggle, images included
-                post_from_juggle(cid, typed, images)
-            except Exception:
-                pass
         ok = dispatch({"session_key": key, "content": text})
+        cid = discord_channel_id(key)
+        if cid and ok is not False:
+            def mirror():  # so the Discord thread shows what was sent from Juggle, images included
+                try:
+                    post_from_juggle(cid, typed, images)
+                except Exception:
+                    pass
+            # Off the request path: an image upload to Discord can outlast the app's timeout,
+            # and the app would then put an already-sent message back in the input bar.
+            threading.Thread(target=mirror, daemon=True).start()
         if ok is None:
             return self.reply(202, b'{"ok":true,"queued":true}')
         self.reply(200 if ok else 503, json.dumps({"ok": ok}).encode())
