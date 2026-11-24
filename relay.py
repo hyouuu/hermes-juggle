@@ -246,6 +246,49 @@ def delete_session(sid):
 JUGGLE_KEY_PREFIX = "agent:main:juggle:dm:"
 
 
+def _approval_mod():
+    """The gateway's own approval module. The relay runs inside the gateway, so this
+    is the live queue Discord's buttons and /approve resolve too."""
+    return sys.modules.get("tools.approval")
+
+
+def pending_approvals():
+    """Every unanswered permission request, across all chats."""
+    mod = _approval_mod()
+    if mod is None:
+        return []
+    out = []
+    with mod._lock:
+        queues = {k: list(v) for k, v in mod._gateway_queues.items()}
+    for key, entries in queues.items():
+        for e in entries:
+            d = e.data
+            out.append({"session_key": key, "request_id": d.get("request_id"),
+                        "command": str(d.get("command") or ""),
+                        "description": str(d.get("description") or ""),
+                        "pattern_keys": [str(p) for p in d.get("pattern_keys") or []],
+                        "allow_session": bool(d.get("allow_session", True)),
+                        "allow_permanent": bool(d.get("allow_permanent", True)),
+                        "smart_denied": bool(d.get("smart_denied", False))})
+    return out
+
+
+def answer_approval(key, request_id, choice):
+    mod = _approval_mod()
+    if mod is None or choice not in ("once", "session", "always", "deny") or not request_id:
+        return 0
+    # Same rule the cards use: a scope Hermes did not offer for this request is never granted.
+    with mod._lock:
+        entry = mod._entry_for_request(key, request_id)
+        if entry is None:
+            return 0
+        if choice == "always" and not entry.data.get("allow_permanent", True):
+            return 0
+        if choice == "session" and not entry.data.get("allow_session", True):
+            return 0
+    return mod.resolve_gateway_approval(key, choice, request_id=request_id)
+
+
 def juggle_chat_id(key):
     return key[len(JUGGLE_KEY_PREFIX):] if (key or "").startswith(JUGGLE_KEY_PREFIX) else None
 
@@ -346,6 +389,8 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 found = []
             return self.reply(200, json.dumps({"direct": found}).encode())
+        if path == "/api/juggle/approvals":
+            return self.reply(200, json.dumps({"live": _approval_mod() is not None, "approvals": pending_approvals()}).encode())
         if path == "/api/channels":
             try:
                 return self.reply(200, json.dumps({"channels": channels()}).encode())
@@ -524,6 +569,15 @@ class Handler(BaseHTTPRequestHandler):
             return self.delete_sessions()
         if path == "/api/discord/rename":
             return self.rename_discord()
+        if path == "/api/juggle/approve":
+            try:
+                n = min(int(self.headers.get("Content-Length", 0)), 4096)
+                b = json.loads(self.rfile.read(n) or b"{}")
+                got = answer_approval(str(b.get("session_key") or ""), str(b.get("request_id") or ""),
+                                      str(b.get("choice") or ""))
+            except Exception:
+                return self.reply(400, b'{"error":"bad json"}')
+            return self.reply(200 if got else 409, json.dumps({"resolved": got}).encode())
         m = REPLY_OK.match(path)
         if not m:
             return self.reply(404, b'{"error":"not allowed"}')
