@@ -246,6 +246,38 @@ def delete_session(sid):
 JUGGLE_KEY_PREFIX = "agent:main:juggle:dm:"
 
 
+def today_jobs():
+    """Read-only summary of scheduled jobs in every profile, for Juggle's Today page.
+    Names, schedules and status only: never prompts, scripts or outputs."""
+    files = [("default", HERMES / "cron" / "jobs.json")]
+    files += [(p.name, p / "cron" / "jobs.json") for p in sorted((HERMES / "profiles").glob("*")) if p.is_dir()]
+    out = []
+    for profile, f in files:
+        try:
+            raw = json.loads(f.read_text())
+        except Exception:
+            continue
+        jobs = raw.get("jobs", []) if isinstance(raw, dict) else raw
+        for j in jobs if isinstance(jobs, list) else []:
+            if not isinstance(j, dict):
+                continue
+            err = j.get("last_error") or j.get("last_delivery_error") or ""
+            out.append({
+                "id": f"{profile}:{j.get('id')}",
+                "profile": profile,
+                "name": str(j.get("name") or j.get("id") or "Job")[:120],
+                "schedule": str(j.get("schedule_display") or "")[:60],
+                "enabled": bool(j.get("enabled")),
+                "state": j.get("state"),
+                "last_status": j.get("last_status"),
+                "last_error": str(err).splitlines()[0][:160] if err else None,
+                "last_run_at": j.get("last_run_at"),
+                "next_run_at": j.get("next_run_at"),
+                "failure_streak": int(j.get("failure_streak") or 0),
+            })
+    return out
+
+
 def _approval_mod():
     """The gateway's own approval module. The relay runs inside the gateway, so this
     is the live queue Discord's buttons and /approve resolve too."""
@@ -389,6 +421,8 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 found = []
             return self.reply(200, json.dumps({"direct": found}).encode())
+        if path == "/api/juggle/today":
+            return self.reply(200, json.dumps({"jobs": today_jobs(), "at": time.time()}).encode())
         if path == "/api/juggle/approvals":
             return self.reply(200, json.dumps({"live": _approval_mod() is not None, "approvals": pending_approvals()}).encode())
         if path == "/api/channels":
